@@ -1,0 +1,37 @@
+name: "RunGuard Actions Report"
+description: "Find costly GitHub Actions workflows, risky permissions, unpinned Actions, and agentic CI/CD injection paths."
+author: "Elevara"
+branding:
+  icon: "activity"
+  color: "orange"
+inputs:
+  workflow-path:
+    description: "Path containing workflow YAML files."
+    required: false
+    default: ".github/workflows"
+  comment:
+    description: "Post a pull request comment when the action runs on a pull request."
+    required: false
+    default: "false"
+  fail-on:
+    description: "Fail the workflow when findings meet this severity: critical, high, medium, low, or never."
+    required: false
+    default: "never"
+  average-monthly-runs:
+    description: "Approximate monthly run count used for waste estimates."
+    required: false
+    default: "80"
+  github-token:
+    description: "GitHub token used for optional PR comments."
+    required: false
+    default: ${{ github.token }}
+outputs:
+  risk-score:
+    description: "RunGuard risk score from 0 to 100."
+  finding-count:
+    description: "Number of findings detected."
+  estimated-monthly-waste-usd:
+    description: "Estimated monthly Actions waste in USD."
+runs:
+  using: "node24"
+  main: "dist/index.js"
