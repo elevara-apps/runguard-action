@@ -1,27 +1,40 @@
 # RunGuard Actions Report
 
-RunGuard Actions Report scans GitHub Actions workflow files for spend waste, risky permissions, unpinned Actions, expensive runner usage, missing concurrency, long timeouts, `pull_request_target` risk, and agentic workflow injection paths.
+RunGuard Actions Report is the free GitHub Marketplace Action for repository-level workflow spend and CI/CD guardrail checks.
 
-This is the Marketplace Action distribution repository for RunGuard for GitHub by Elevara.
+Public site: https://elevara-apps.github.io/runguard/
+
+It scans `.github/workflows` and writes a GitHub Step Summary with:
+
+- expensive runner labels
+- missing concurrency cancellation
+- long job timeouts
+- unpinned third-party Actions
+- broad workflow permissions
+- risky `pull_request_target` usage
+- untrusted PR, issue, or comment text flowing into shell or agentic steps
 
 ## Usage
 
 ```yaml
-name: RunGuard
+name: RunGuard report
 
 on:
   pull_request:
+    paths:
+      - ".github/workflows/**"
   workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   runguard:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      - uses: elevara-apps/runguard-action@v0.1.0
+      - uses: elevara-apps/runguard-action@v0.1.1
         with:
           comment: "true"
           fail-on: "critical"
@@ -30,24 +43,23 @@ jobs:
 ## Inputs
 
 | Input | Default | Description |
-|---|---:|---|
-| `workflow-path` | `.github/workflows` | Directory containing workflow YAML files. |
-| `comment` | `false` | Post a pull request comment when running on a PR. |
-| `fail-on` | `never` | Fail when findings meet `critical`, `high`, `medium`, or `low`. |
-| `average-monthly-runs` | `80` | Run count used for monthly waste estimates. |
-| `github-token` | `${{ github.token }}` | Token used for optional PR comments. |
+|---|---|---|
+| `workflow-path` | `.github/workflows` | Directory containing workflow files. |
+| `comment` | `false` | Post a PR comment when running on pull requests. |
+| `fail-on` | `never` | Fail on `critical`, `high`, `medium`, `low`, or `never`. |
+| `average-monthly-runs` | `80` | Used for approximate waste estimates. |
+| `github-token` | `${{ github.token }}` | Token for optional comments. |
 
 ## Outputs
 
-- `risk-score`
-- `finding-count`
-- `estimated-monthly-waste-usd`
+| Output | Description |
+|---|---|
+| `risk-score` | 0-100 workflow spend/security score. |
+| `finding-count` | Number of findings. |
+| `estimated-monthly-waste-usd` | Approximate monthly waste estimate. |
 
-## Product Path
+## Sample Report
 
-The free Action is the top-of-funnel distribution wedge. The GitHub App adds org-wide scheduled reports, install-level history, budget alerts, and paid Marketplace plans after install traction.
+See `examples/sample-report.md` in the public Action repository for a generated report from an intentionally risky workflow.
 
-Product workspace and marketing site:
-
-- https://github.com/elevara-apps/runguard-for-github
-- https://elevara-apps.github.io/runguard-for-github/
+The Action is the first distribution surface. Install the RunGuard GitHub App for organization-wide scheduled reporting once available.

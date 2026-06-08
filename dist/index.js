@@ -31231,12 +31231,16 @@ function renderMarkdownReport(report) {
     "",
     "## Top Findings",
     "",
-    topFindings.length === 0 ? "No spend, reliability, or workflow security findings were detected in the scanned files." : "| Severity | Category | Finding | Location | Recommendation |",
-    topFindings.length === 0 ? "" : "|---|---|---|---|---|",
+    topFindings.length === 0 ? "No spend, reliability, or workflow security findings were detected in the scanned files." : "| Severity | Rule | Category | Finding | Location | Fix |",
+    topFindings.length === 0 ? "" : "|---|---|---|---|---|---|",
     ...topFindings.map((finding) => {
       const location = finding.line ? `${finding.filePath}:${finding.line}` : finding.filePath;
-      return `| ${finding.severity} | ${finding.category} | ${escapeMarkdown(finding.title)} | ${escapeMarkdown(location)} | ${escapeMarkdown(finding.recommendation)} |`;
+      return `| ${finding.severity} | ${finding.ruleId} | ${finding.category} | ${escapeMarkdown(finding.title)} | ${escapeMarkdown(location)} | ${escapeMarkdown(finding.recommendation)} |`;
     }),
+    "",
+    "## Fix Snippets",
+    "",
+    ...renderFixSnippets(topFindings),
     "",
     "## Next Actions",
     "",
@@ -31262,12 +31266,14 @@ function scanWorkflowFile(file, options) {
   addMissingPermissionsFinding(file, workflow, findings);
   addWriteAllPermissionFindings(file, findings);
   addPullRequestTargetFindings(file, triggers, findings);
+  addPullRequestTargetCheckoutFindings(file, triggers, findings);
   addActionPinningFindings(file, findings);
   addUntrustedContextFindings(file, findings);
   addAgenticWorkflowFindings(file, findings);
   addRunnerSpendFindings(file, runnerLabels, monthlyRuns, findings);
   addConcurrencyFindings(file, workflow, triggers, findings);
   addTimeoutFindings(file, findings);
+  addFrequentScheduleFindings(file, findings);
   const estimatedMonthlyWasteUsd = roundMoney(findings.reduce((total, finding) => total + (finding.estimatedMonthlyWasteUsd ?? 0), 0));
   return {
     summary: {
@@ -31323,8 +31329,10 @@ function addMissingPermissionsFinding(file, workflow, findings) {
   findings.push(makeFinding(file, "permissions-missing", "security", "medium", {
     title: "Workflow has no top-level permissions block",
     summary: "Without an explicit permissions block, the workflow may inherit broader token access than intended.",
+    impact: "Overbroad default token scope can turn a workflow bug into repository write access.",
     recommendation: "Add top-level `permissions: read-all` or the minimum specific scopes needed by each job.",
     evidence: "No top-level `permissions` key found.",
+    fixSnippet: "permissions: read-all",
     confidence: "medium"
   }));
 }
@@ -31333,8 +31341,14 @@ function addWriteAllPermissionFindings(file, findings) {
     findings.push(makeFinding(file, "permissions-write-all", "security", "critical", {
       title: "Workflow grants write-all token permissions",
       summary: "`permissions: write-all` gives the workflow broad repository write access.",
+      impact: "A compromised step or dependency can write code, tags, releases, issues, or other repository resources.",
       recommendation: "Replace `write-all` with the smallest set of required permissions.",
       evidence: match[0],
+      fixSnippet: [
+        "permissions:",
+        "  contents: read",
+        "  pull-requests: write # only when PR comments are required"
+      ].join("\n"),
       confidence: "high",
       line: lineOf(file.content, match.index ?? 0)
     }));
@@ -31346,10 +31360,41 @@ function addPullRequestTargetFindings(file, triggers, findings) {
   findings.push(makeFinding(file, "pull-request-target", "security", "critical", {
     title: "Workflow uses pull_request_target",
     summary: "`pull_request_target` can expose write tokens and secrets to workflows influenced by untrusted pull requests.",
+    impact: "If the workflow checks out or executes attacker-controlled code, a forked PR can become a write-token or secret-exposure path.",
     recommendation: "Use `pull_request` unless this workflow is carefully isolated and does not run untrusted code.",
     evidence: "pull_request_target",
+    fixSnippet: [
+      "on:",
+      "  pull_request:",
+      "    types: [opened, synchronize, reopened]"
+    ].join("\n"),
     confidence: "high",
     ...optionalLine(lineOfPattern(file.content, /pull_request_target/))
+  }));
+}
+function addPullRequestTargetCheckoutFindings(file, triggers, findings) {
+  const usesPullRequestTarget = triggers.includes("pull_request_target") || /\bpull_request_target\b/.test(file.content);
+  if (!usesPullRequestTarget)
+    return;
+  const pattern = /github\.event\.pull_request\.head\.(sha|ref|repo|repo\.full_name)|github\.head_ref|refs\/pull\/\$\{\{\s*github\.event\.pull_request\.number\s*\}\}/i;
+  const line = lineOfPattern(file.content, pattern);
+  if (!line)
+    return;
+  findings.push(makeFinding(file, "pull-request-target-checkout-head", "security", "critical", {
+    title: "pull_request_target workflow appears to checkout PR-controlled code",
+    summary: "The workflow combines `pull_request_target` with a pull request head reference.",
+    impact: "This is one of the highest-risk GitHub Actions patterns because privileged workflow context can execute attacker-controlled fork code.",
+    recommendation: "Do not checkout PR head code in `pull_request_target`. Split label/comment automation from untrusted code execution.",
+    evidence: "pull_request_target plus pull request head reference",
+    fixSnippet: [
+      "on:",
+      "  pull_request:",
+      "",
+      "permissions:",
+      "  contents: read"
+    ].join("\n"),
+    confidence: "high",
+    line
   }));
 }
 function addActionPinningFindings(file, findings) {
@@ -31367,8 +31412,10 @@ function addActionPinningFindings(file, findings) {
     findings.push(makeFinding(file, "action-not-sha-pinned", "security", githubOwned ? "medium" : "high", {
       title: "Action is not pinned to a full commit SHA",
       summary: `${action}@${ref} is mutable. Tag or branch hijacking can change what this workflow executes.`,
+      impact: "Mutable tags and branches can silently change the code that runs inside CI/CD.",
       recommendation: "Pin high-risk third-party Actions to a full commit SHA and review update cadence.",
       evidence: `${action}@${ref}`,
+      fixSnippet: `uses: ${action}@<40-character-reviewed-commit-sha>`,
       confidence: "high",
       line: lineOf(file.content, match.index)
     }));
@@ -31382,8 +31429,14 @@ function addUntrustedContextFindings(file, findings) {
     findings.push(makeFinding(file, "untrusted-context", "security", "high", {
       title: "Workflow consumes untrusted GitHub event context",
       summary: `The workflow references \`${context3}\`, which can be attacker-controlled in issue, comment, or pull-request flows.`,
+      impact: "Untrusted text can alter shell commands, release notes, prompts, or agent instructions if it is interpolated without boundaries.",
       recommendation: "Do not pass untrusted event text directly to shell, deployment, release, or agentic steps.",
       evidence: context3,
+      fixSnippet: [
+        "- Store untrusted text in a file or escaped environment value.",
+        "- Avoid direct shell interpolation.",
+        "- Add allowlists before release, deploy, or agent steps."
+      ].join("\n"),
       confidence: "medium",
       line: lineOf(file.content, index)
     }));
@@ -31398,8 +31451,16 @@ function addAgenticWorkflowFindings(file, findings) {
   findings.push(makeFinding(file, "agentic-workflow-injection", "security", "critical", {
     title: "Possible agentic workflow injection path",
     summary: "This workflow appears to combine AI/agent tooling with untrusted GitHub event text.",
+    impact: "A PR, issue, or comment can become a prompt-injection path into tools that can read code, call CLIs, or write comments.",
     recommendation: "Treat PR, issue, and comment text as untrusted. Add prompt boundaries, allowlists, and restricted tokens before invoking AI or agentic tools.",
     evidence: "AI/agent term plus untrusted event context detected.",
+    fixSnippet: [
+      "permissions:",
+      "  contents: read",
+      "  pull-requests: read",
+      "",
+      "# Pass only reviewed, bounded context to AI/agent tooling."
+    ].join("\n"),
     confidence: "medium",
     ...optionalLine(lineOfPattern(file.content, /openai|anthropic|claude|copilot|codex|cursor|aider|llm|agent/i))
   }));
@@ -31415,8 +31476,10 @@ function addRunnerSpendFindings(file, runnerLabels, monthlyRuns, findings) {
     findings.push(makeFinding(file, "expensive-runner", "spend", rate.label === "macOS" ? "medium" : "low", {
       title: `${rate.label} runner may be driving avoidable Actions spend`,
       summary: `The workflow uses \`${label}\`, which is materially more expensive than baseline Linux runners.`,
+      impact: "Platform-specific hosted runners can multiply CI spend when used for portable jobs or superseded PR runs.",
       recommendation: "Confirm this runner is required. Move portable jobs to Linux and reserve expensive runners for platform-specific work.",
       evidence: label,
+      fixSnippet: "runs-on: ubuntu-latest # when the job is portable",
       confidence: "medium",
       ...optionalLine(lineOfPattern(file.content, new RegExp(escapeRegExp(label)))),
       estimatedMonthlyWasteUsd: estimatedWaste
@@ -31430,8 +31493,14 @@ function addConcurrencyFindings(file, workflow, triggers, findings) {
   findings.push(makeFinding(file, "missing-concurrency", "reliability", "low", {
     title: "Workflow has no concurrency cancellation",
     summary: "Older workflow runs may keep consuming minutes after newer commits supersede them.",
+    impact: "Busy PR branches can run obsolete jobs, slowing feedback and wasting Actions minutes.",
     recommendation: "Add a `concurrency` group with `cancel-in-progress: true` for PR and branch workflows.",
     evidence: "No top-level `concurrency` key found.",
+    fixSnippet: [
+      "concurrency:",
+      "  group: ${{ github.workflow }}-${{ github.ref }}",
+      "  cancel-in-progress: true"
+    ].join("\n"),
     confidence: "medium",
     estimatedMonthlyWasteUsd: 6.4
   }));
@@ -31446,11 +31515,35 @@ function addTimeoutFindings(file, findings) {
     findings.push(makeFinding(file, "long-timeout", "spend", "low", {
       title: "Workflow job has a long timeout",
       summary: `A ${minutes}-minute timeout can allow hung jobs to consume unnecessary Actions minutes.`,
+      impact: "Hung jobs can keep spending minutes long after the useful failure signal is available.",
       recommendation: "Set job timeouts close to expected runtime and alert separately on genuine long-running work.",
       evidence: match[0],
+      fixSnippet: "timeout-minutes: 30",
       confidence: "medium",
       line: lineOf(file.content, match.index),
       estimatedMonthlyWasteUsd: roundMoney((minutes - 60) * 6e-3)
+    }));
+  }
+}
+function addFrequentScheduleFindings(file, findings) {
+  const regex = /cron:\s*["']?([^"'\n#]+)["']?/gi;
+  let match;
+  while ((match = regex.exec(file.content)) !== null) {
+    const cron = (match[1] ?? "").trim();
+    const interval = scheduledMinuteInterval(cron);
+    if (!interval || interval > 10)
+      continue;
+    const monthlyRuns = Math.round(60 / interval * 24 * 30);
+    findings.push(makeFinding(file, "frequent-schedule", "spend", interval <= 5 ? "medium" : "low", {
+      title: "Workflow schedule runs very frequently",
+      summary: `The cron schedule appears to run about every ${interval} minute${interval === 1 ? "" : "s"}.`,
+      impact: "Frequent scheduled workflows can quietly accumulate spend even when no code changes.",
+      recommendation: "Use a less frequent schedule unless the workflow is genuinely time-sensitive.",
+      evidence: cron,
+      fixSnippet: "cron: '0 * * * *' # hourly",
+      confidence: "medium",
+      line: lineOf(file.content, match.index),
+      estimatedMonthlyWasteUsd: roundMoney(monthlyRuns * 2 * 6e-3)
     }));
   }
 }
@@ -31477,6 +31570,21 @@ function countBySeverity(findings) {
     return counts;
   }, { critical: 0, high: 0, medium: 0, low: 0 });
 }
+function renderFixSnippets(findings) {
+  const fixable = findings.filter((finding) => finding.fixSnippet).slice(0, 6);
+  if (fixable.length === 0)
+    return ["No fix snippets are available for the current findings."];
+  return fixable.flatMap((finding) => [
+    `### ${finding.ruleId}: ${finding.title}`,
+    "",
+    finding.impact ? `${finding.impact}` : finding.summary,
+    "",
+    "```text",
+    finding.fixSnippet ?? "",
+    "```",
+    ""
+  ]);
+}
 function lineOfPattern(content, pattern) {
   const match = pattern.exec(content);
   if (!match?.index)
@@ -31488,6 +31596,19 @@ function optionalLine(line) {
 }
 function lineOf(content, index) {
   return content.slice(0, index).split(/\r?\n/).length;
+}
+function scheduledMinuteInterval(cron) {
+  const minute = cron.trim().split(/\s+/)[0];
+  if (!minute)
+    return void 0;
+  if (minute === "*")
+    return 1;
+  const everyMatch = minute.match(/^(?:\d+|\*)\/(\d+)$/);
+  if (everyMatch) {
+    const interval = Number(everyMatch[1]);
+    return Number.isFinite(interval) && interval > 0 ? interval : void 0;
+  }
+  return void 0;
 }
 function escapeMarkdown(value) {
   return value.replace(/\|/g, "\\|").replace(/\n/g, " ");
