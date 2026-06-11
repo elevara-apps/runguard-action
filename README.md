@@ -2,7 +2,7 @@
 
 RunGuard Actions Report is the free GitHub Marketplace Action for repository-level workflow spend and CI/CD guardrail checks.
 
-Public site: https://elevara-apps.github.io/runguard/
+Public site: https://runguard-dev.github.io/
 
 It scans `.github/workflows` and writes a GitHub Step Summary with:
 
